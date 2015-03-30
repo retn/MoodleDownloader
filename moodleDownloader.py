@@ -3,34 +3,39 @@ import sys
 import shutil
 import json
 import time
-
+import logging
+import os
 
 import requests
 import lxml.html
 
 class MoodleDownloader:
 
-    def __init__(self, user, passwd):
-        self.__cred = [('username', user), ('password', passwd)]
-        self.__ids = {}
-        self.__readOldID()
-        self.__readJSON()
-        self.__url = "https://moodle.adress-of-your-university-or-whatever.edu"
+    loginURL = "login/index.php"
+    courseURL = "course/view.php"
+    resourceURL = "mod/resource/view.php"
+
+    def __init__(self, user, passwd, url):
+        self._cred = [('username', user), ('password', passwd)]
+        self._ids = {}
+        self._readOldID()
+        self._readJSON()
+        self._url = url
 
     def start(self):
-        print 'Logging in...'
-        self.__login()
-        print 'Logged in...'
+        print('Logging in...')
+        self._login()
+        print('Logged in...')
 
-        self.__check()
+        self._check()
 
-    def __check(self):
+    def _check(self):
 
-        for course in self.__config:
-            self.__getCourse(self.__config[course]['ID'])
-            root = lxml.html.fromstring(self.__r.text)
+        for course in self._config:
+            self._getCourse(self._config[course]['ID'])
+            root = lxml.html.fromstring(self._r.text)
 
-            for typ in self.__config[course]['type']:
+            for typ in self._config[course]['type']:
                 links = root.xpath("//h3[text() = $type]/../ul/li//a", type=typ)
                 fileNames = root.xpath("//h3[text() = $type]/../ul/li//a/span/text()", type=typ)
 
@@ -40,112 +45,121 @@ class MoodleDownloader:
                     links.reverse()
                     fileNames.reverse()
                     courseID = course + "." + typ
-                    print 'Checking', self.__config[course]['type'][typ], 'in course', course
+                    print('Checking %s in course %s' % (typ, course))
 
                     # get the ID of the file -> done this way to be sure that the right element is used..
                     for elemList in links[0].items():
                         if elemList[0] == 'href':
                             elemID = elemList[1].split('?id=')[1]
-                            break
 
                     if elemID == '':
-                        print 'Error getting the id from', links[0].items()
-                    elif (courseID not in self.__ids) or (self.__ids[courseID] != elemID):
+                        print('Error getting the id from %s' % links[0].items())
+                    elif (courseID not in self._ids) or (self._ids[courseID] != elemID):
                         # download & write new config
-                        self.__downloadPDF(elemID, fileNames[0], self.__config[course]['type'][typ])
-                        self.__newID(courseID, elemID)
+                        self._downloadPDF(elemID, fileNames[0], self._config[course]['type'][typ])
+                        self._newID(courseID, elemID)
                     else:
-                        print 'No new file for ', course, ' in ', typ,'...'
+                        print('No new file for %s in %s...' % (course, typ))
                 else:
-                    print 'No links found for ', course , '!'
+                    print('No links found for %s!' % course)
 
-    def __login(self):
+    def _login(self):
         ''' Login into the moodle server  '''
         # do redirect manually or otherwise the cookies will be lost
-        self.__r = requests.post(self.__url + "login/index.php", data=self.__cred, allow_redirects=False)
-        self.__cookies = self.__r.cookies
-        self.__r = requests.get(self.__r.headers['location'], cookies=self.__cookies)
+        self._r = requests.post(self._url + self.loginURL, data=self._cred, allow_redirects=False)
+        self._cookies = self._r.cookies
+        self._r = requests.get(self._r.headers['location'], cookies=self._cookies)
 
-    def __getCourse(self, courseID):
+    def _getCourse(self, courseID):
         ''' get the site of an course for further parsing '''
-        payload = {'id' : courseID}
-        self.__r = requests.get(self.__url + "course/view.php", params=payload, cookies=self.__cookies)
+        payload = {'id' : courseID, 'redirect' : 1}
+        self._r = requests.get(self._url + self.courseURL, params=payload, cookies=self._cookies, allow_redirects=True)
 
-    def __downloadPDF(self, idOfFile, fileName, path):
-        print 'Download new file', fileName, 'with id', idOfFile, '...'
+    def _downloadPDF(self, idOfFile, fileName, path):
+        print('Download new file %s with id %s...' % (fileName, idOfFile))
         payload = {'id' : idOfFile}
-        self.__r = requests.get(self.__url + 'mod/resource/view.php', params=payload, cookies=self.__cookies)
+        self._r = requests.get(self._url + self.resourceURL, params=payload, cookies=self._cookies)
 
-        # Check if the PDF is opend in a viewer or directly served
-        if not self.__checkIfPDF():
-            self.__getPDFOfViewer()
+        # Check if the PDF is opend in a viewer, subsite or directly served
+        if not self._checkIfPDF():
+            self._getPDFOfViewerOrOther(fileName)
 
         try:
-            if 'content-disposition' in self.__r.headers:
-                pdfName = self.__r.headers['content-disposition'].split('filename=')[1].strip('"')
+            if 'content-disposition' in self._r.headers:
+                pdfName = self._r.headers['content-disposition'].split('filename=')[1].strip('"')
             else:
                 pdfName = fileName + ".pdf"
         except AttributeError:
             pdfName = str(time.time()) + ".pdf"
 
         with open(pdfName, 'wb') as pdfFile:
-            pdfFile.write(self.__r.content)
+            pdfFile.write(self._r.content)
 
-        shutil.move(pdfName, path)
-        print 'Downloaded', pdfName
+        try:
+            shutil.move(pdfName, path)
+            print('Downloaded %s' % pdfName)
+        except shutil.Error:
+            os.remove(pdfName)
+            print('File %s already exists, deleting downloaded..' % pdfName)
 
-    def __checkIfPDF(self):
+
+    def _checkIfPDF(self):
         ''' Sometimes a viewer get opened, instead of returning the pdf file '''
-        if self.__r.text.startswith('<!DOCTYPE'):
-            #print 'PDF in viewer'
+        if self._r.text.startswith('<!DOCTYPE'):
             return False
         else:
-            #print 'PDF-File directly'
             return True
 
-    def __getPDFOfViewer(self):
-        self.__r = requests.get(self.__r.url, cookies=self.__cookies)
+    def _getPDFOfViewerOrOther(self, name):
+        root = lxml.html.fromstring(self._r.text)
+        links = root.xpath("//h2[text() = $name]/..//a", name=name)
+
+        for elemList in links[0].items():
+            if elemList[0] == 'href':
+                url = elemList[1]
+
+        self._r = requests.get(url, cookies=self._cookies)
 
     # Read the old id's to not download the same pdf again
-    def __readOldID(self):
+    def _readOldID(self):
         try:
-            oldIDs = open('oldid', 'r+')
-            self.__ids = json.load(oldIDs)
-            oldIDs.close()
+            if (os.path.isfile('oldid')) and (os.stat('oldid').st_size > 0):
+                oldIDs = open('oldid', 'r')
+                self._ids = json.load(oldIDs)
+                oldIDs.close()
         except IOError:
-            print "Couldn't read oldid file!"
-            sys.exit(0)
+            print("Couldn't read oldid file!")
         except:
-            print "An error occured while reading the oldid file!"
-            print sys.exc_info()
+            print("An error occured while reading the oldid file!")
+            print(sys.exc_info())
             sys.exit(0)
 
     # There is a newer file which has been downloaded
     # so set a new old id for next start
-    def __newID(self, keyNew, valueNew):
+    def _newID(self, keyNew, valueNew):
         try:
             fileID = open('oldid', 'w+')
-            self.__ids[keyNew] = valueNew
-            json.dump(self.__ids, fileID)
+            self._ids[keyNew] = valueNew
+            json.dump(self._ids, fileID)
             fileID.close()
         except IOError:
-            print "Couldn't open oldid file for writing!"
+            print("Couldn't open oldid file for writing!")
             sys.exit(0)
         except:
-            print "An error occured while writing the old id file!"
-            print sys.exc_info()
+            print("An error occured while writing the old id file!")
+            print(sys.exc_info())
             sys.exit(0)
 
     # Read the JSON config file
-    def __readJSON(self):
+    def _readJSON(self):
         try:
             fileJSON = open('config', 'r')
-            self.__config = json.load(fileJSON)
+            self._config = json.load(fileJSON)
             fileJSON.close()
         except IOError:
-            print "Couldn't open config file for reading!"
+            print("Couldn't open config file for reading!")
             sys.exit(0)
         except:
-            print "An error occured while reading the config file!"
-            print sys.exc_info()
+            print("An error occured while reading the config file!")
+            print(sys.exc_info())
             sys.exit(0)
